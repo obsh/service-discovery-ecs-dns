@@ -277,20 +277,20 @@ func removeARecord(hostName string) error {
 	return nil
 }
 
-func createSRVRecordSet(dockerId, port, serviceName string) *route53.ResourceRecordSet {
-	srvRecordName := serviceName + "." + DNSName
+func createCNAMERecordSet(dockerId, port, serviceName string) *route53.ResourceRecordSet {
+	cnameRecordName := serviceName + "." + DNSName
 
 	return &route53.ResourceRecordSet{
-		Name: aws.String(srvRecordName),
-		// It creates a SRV record with the name of the service
-		Type: aws.String(route53.RRTypeSrv),
+		Name: aws.String(cnameRecordName),
+		// It creates a CNAME record with the name of the service
+		Type: aws.String(route53.RRTypeCname),
 		ResourceRecords: []*route53.ResourceRecord{
 			{
 				// priority: the priority of the target host, lower value means more preferred
 				// weight: A relative weight for records with the same priority, higher value means more preferred
 				// port: the TCP or UDP port on which the service is to be found
 				// target: the canonical hostname of the machine providing the service
-				Value: aws.String("1 1 " + port + " " + configuration.Hostname),
+				Value: aws.String(configuration.Hostname),
 			},
 		},
 		SetIdentifier: aws.String(configuration.Hostname + ":" + dockerId),
@@ -312,7 +312,7 @@ func createDNSRecord(serviceName string, dockerId string, port string) error {
 			Changes: []*route53.Change{
 				{
 					Action:            aws.String(route53.ChangeActionCreate),
-					ResourceRecordSet: createSRVRecordSet(dockerId, port, serviceName),
+					ResourceRecordSet: createCNAMERecordSet(dockerId, port, serviceName),
 				},
 			},
 			Comment: aws.String("Service Discovery Created Record"),
@@ -331,21 +331,21 @@ func deleteDNSRecord(serviceName string, dockerId string) error {
 		return err
 	}
 	r53 := route53.New(sess)
-	srvRecordName := serviceName + "." + DNSName
-	srvSetIdentifier := configuration.Hostname + ":" + dockerId
+	cnameRecordName := serviceName + "." + DNSName
+	cnameSetIdentifier := configuration.Hostname + ":" + dockerId
 	// This API Call looks for the Route53 DNS record for this service and docker ID to get the values to delete
 	paramsList := &route53.ListResourceRecordSetsInput{
 		HostedZoneId:    aws.String(configuration.HostedZoneId), // Required
 		MaxItems:        aws.String("100"),
-		StartRecordName: aws.String(srvRecordName),
-		StartRecordType: aws.String(route53.RRTypeSrv),
+		StartRecordName: aws.String(cnameRecordName),
+		StartRecordType: aws.String(route53.RRTypeCname),
 	}
 	more := true
 	var recordSetToDelete *route53.ResourceRecordSet
 	resp, err := r53.ListResourceRecordSets(paramsList)
 	for more && recordSetToDelete == nil && err == nil {
 		for _, rrset := range resp.ResourceRecordSets {
-			if isManagedResourceRecordSet(rrset) && *rrset.SetIdentifier == srvSetIdentifier {
+			if isManagedResourceRecordSet(rrset) && *rrset.SetIdentifier == cnameSetIdentifier {
 				recordSetToDelete = rrset
 			}
 		}
@@ -381,7 +381,7 @@ func deleteDNSRecord(serviceName string, dockerId string) error {
 	_, err = r53.ChangeResourceRecordSets(params)
 	logErrorNoFatal(err)
 	if err == nil {
-		log.Info("Record " + srvRecordName + " deleted")
+		log.Info("Record " + cnameRecordName + " deleted")
 	}
 	return err
 }
@@ -391,14 +391,14 @@ var dockerClient *docker.Client
 func isManagedResourceRecordSet(rrs *route53.ResourceRecordSet) bool {
 	return rrs != nil &&
 		rrs.Type != nil &&
-		*rrs.Type == route53.RRTypeSrv &&
+		*rrs.Type == route53.RRTypeCname &&
 		rrs.SetIdentifier != nil &&
 		strings.HasPrefix(*rrs.SetIdentifier, configuration.Hostname)
 }
 
 // Synchronizes the service records of the hosted zone against the currently running docker instances.
-// SRV records associated with containers on this host which are no longer running, will be removed.
-// Missing SRV records from running containers are added.
+// CNAME records associated with containers on this host which are no longer running, will be removed.
+// Missing CNAME records from running containers are added.
 func syncDNSRecords() error {
 	containers, err := dockerClient.ContainerList(context.Background(), types.ContainerListOptions{})
 	if err != nil {
@@ -464,7 +464,7 @@ func syncDNSRecords() error {
 	changes := make([]*route53.Change, 0, len(toDelete)+len(toAdd))
 
 	for _, rrs := range toDelete {
-		log.Infof("Removing SRV record %s %s", *rrs.Name, *rrs.ResourceRecords[0].Value)
+		log.Infof("Removing CNAME record %s %s", *rrs.Name, *rrs.ResourceRecords[0].Value)
 		changes = append(changes, &route53.Change{
 			Action:            aws.String(route53.ChangeActionDelete),
 			ResourceRecordSet: rrs,
@@ -479,8 +479,8 @@ func syncDNSRecords() error {
 		allServices := getNetworkPortAndServiceName(container, true)
 		for _, svc := range allServices {
 			if svc.Name != "" && svc.Port != "" {
-				rrs := createSRVRecordSet(id, svc.Port, svc.Name)
-				log.Infof("Adding SRV record %s %s", *rrs.Name, *rrs.ResourceRecords[0].Value)
+				rrs := createCNAMERecordSet(id, svc.Port, svc.Name)
+				log.Infof("Adding CNAME record %s %s", *rrs.Name, *rrs.ResourceRecords[0].Value)
 				changes = append(changes, &route53.Change{
 					Action:            aws.String(route53.ChangeActionUpsert),
 					ResourceRecordSet: rrs,
@@ -504,8 +504,8 @@ func syncDNSRecords() error {
 	return nil
 }
 
-// Remove all SRV records from the hosted zone associated with this host. Run this on the shutdown event of the host.
-func removeAllSRVRecords() {
+// Remove all CNAME records from the hosted zone associated with this host. Run this on the shutdown event of the host.
+func removeAllCNAMERecords() {
 	sess, err := session.NewSession()
 	logErrorAndFail(err)
 	r53 := route53.New(sess)
@@ -521,7 +521,7 @@ func removeAllSRVRecords() {
 	for more && err == nil {
 		for _, rrset := range resp.ResourceRecordSets {
 			if isManagedResourceRecordSet(rrset) {
-				log.Infof("Removing SRV record %s %s", *rrset.Name, *rrset.ResourceRecords[0].Value)
+				log.Infof("Removing CNAME record %s %s", *rrset.Name, *rrset.ResourceRecords[0].Value)
 				changes = append(changes, &route53.Change{
 					Action:            aws.String(route53.ChangeActionDelete),
 					ResourceRecordSet: rrset,
@@ -623,7 +623,7 @@ func main() {
 	var sendEvents = flag.Bool("cw-send-events", false, "Send CloudWatch events when a container is created or terminated")
 	var remove = flag.Bool("remove", false, "Remove all DNS records associated with this instance")
 	var sync = flag.Bool("sync", false, "Synchronize this instance and exit")
-	var hostnameOverride = flag.String("hostname", "", "to use for registering the SRV records")
+	var hostnameOverride = flag.String("hostname", "", "to use for registering the CNAME records")
 
 	flag.Parse()
 
@@ -672,7 +672,7 @@ func main() {
 	logErrorAndFail(err)
 
 	if *remove {
-		removeAllSRVRecords()
+		removeAllCNAMERecords()
 		removeARecord(configuration.Hostname)
 
 		os.Exit(0)
